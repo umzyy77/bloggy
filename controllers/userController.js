@@ -1,32 +1,37 @@
 import User from '../models/user.js';
+import { Blog, Comment } from '../models/blog.js';
 import mongoose from 'mongoose';
 
 // GET /users
-// je n'ai pas mis les filtre avec regex car pas indiqué 
 async function getAllUsers(req, res) {
   try {
     const { sort, ...filters } = req.query;
-
+    
     let users = await User.find(filters);
 
-    // Calculer le nombre de commentaires pour chaque utilisateur
-    if (sort && sort.startsWith("commentsCount")) {
-      // récupérer tous les blogs
-      const blogs = await Blog.find({}, 'comments');
+    if (sort) {
+      const [field, order] = sort.split("_");
+      const multiplier = order === "desc" ? -1 : 1;
 
-      const userCommentMap = {};
-      users.forEach(u => userCommentMap[u._id] = 0);
-
-      blogs.forEach(blog => {
-        blog.comments.forEach(c => {
-          if (userCommentMap[c.user]) {
-            userCommentMap[c.user]++;
+      if (field === "username") {
+        users.sort((a, b) => a.username.localeCompare(b.username) * multiplier);
+      } else if (field === "createdAt") {
+        users.sort((a, b) => (a.createdAt - b.createdAt) * multiplier);
+      } else if (field === "commentsCount") {
+        const userCommentCounts = await Comment.aggregate([
+          { $group: { _id: "$user", count: { $sum: 1 } } }
+        ]);
+        
+        const userCommentMap = {};
+        users.forEach(u => userCommentMap[u._id.toString()] = 0);
+        userCommentCounts.forEach(item => {
+          if (item._id && userCommentMap[item._id.toString()] !== undefined) {
+            userCommentMap[item._id.toString()] = item.count;
           }
         });
-      });
-
-      const multiplier = sort.endsWith("desc") ? -1 : 1;
-      users.sort((a, b) => (userCommentMap[a._id] - userCommentMap[b._id]) * multiplier);
+        
+        users.sort((a, b) => (userCommentMap[a._id.toString()] - userCommentMap[b._id.toString()]) * multiplier);
+      }
     }
 
     res.status(200).json(users);
@@ -35,14 +40,13 @@ async function getAllUsers(req, res) {
   }
 }
 
-
-
 // GET /users/:id
 async function getUserById(req, res) {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ error: 'Invalid ID format' });
     }
+
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
@@ -56,13 +60,19 @@ async function getUserById(req, res) {
 async function createUser(req, res) {
   try {
     const { username, email, firstName, lastName } = req.body;
+    
     if (!username || !email) {
       return res.status(400).json({ error: 'Username and email are required' });
     }
 
-    const user = new User({ username, email, firstName, lastName });
-    await user.save();
+    const user = new User({ 
+      username, 
+      email, 
+      firstName, 
+      lastName 
+    });
 
+    await user.save();
     res.status(201).json(user);
   } catch (err) {
     if (err.code === 11000) {
@@ -81,6 +91,7 @@ async function updateUser(req, res) {
     }
 
     const { username, email, firstName, lastName } = req.body;
+    
     const user = await User.findByIdAndUpdate(
       req.params.id,
       { username, email, firstName, lastName },
@@ -99,7 +110,7 @@ async function updateUser(req, res) {
   }
 }
 
-// DELETE /users/:id
+// DELETE /users/:id 
 async function deleteUser(req, res) {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -109,7 +120,55 @@ async function deleteUser(req, res) {
     const user = await User.findByIdAndDelete(req.params.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    res.status(200).json({ message: 'User deleted successfully', user });
+    // Optionnel: Supprimer aussi les blogs et commentaires de cet utilisateur
+    await Blog.deleteMany({ author: req.params.id });
+    await Comment.deleteMany({ user: req.params.id });
+
+    res.status(200).json({ 
+      message: 'User deleted successfully', 
+      user 
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+// GET /users/:id/comments
+async function getCommentsByUser(req, res) {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid ID format' });
+    }
+
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const comments = await Comment.find({ user: req.params.id })
+      .populate('blog', 'title author')
+      .populate('user', 'username firstName lastName')
+      .sort({ createdAt: -1 });
+
+    res.status(200).json(comments);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+// GET /users/:id/blogs
+async function getBlogsByUser(req, res) {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid ID format' });
+    }
+
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const blogs = await Blog.find({ author: req.params.id })
+      .populate('author', 'username firstName lastName')
+      .sort({ createdAt: -1 });
+
+    res.status(200).json(blogs);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -120,5 +179,7 @@ export default {
   getUserById,
   createUser,
   updateUser,
-  deleteUser
+  deleteUser,
+  getCommentsByUser,
+  getBlogsByUser
 };
